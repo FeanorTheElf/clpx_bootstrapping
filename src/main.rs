@@ -3,35 +3,36 @@
 #![feature(allocator_api)]
 #![feature(iter_array_chunks)]
 
-use std::alloc::{Allocator, Global};
+use std::alloc::Allocator;
 use std::array::from_ref;
 
 use feanor_math::algorithms::convolution::ConvolutionAlgorithm;
 use feanor_math::algorithms::fft::cooley_tuckey::bitreverse;
 use feanor_math::algorithms::int_factor::is_prime_power;
-use feanor_math::algorithms::interpolate::interpolate;
-use feanor_math::divisibility::{DivisibilityRing, DivisibilityRingStore};
+use feanor_math::divisibility::*;
 use feanor_math::group::AbelianGroupStore;
 use feanor_math::homomorphism::Homomorphism;
 use feanor_math::integer::{int_cast, BigIntRing, IntegerRingStore};
-use feanor_math::primitive_int::{StaticRing, StaticRingBase};
+use feanor_math::primitive_int::*;
 use feanor_math::seq::permute::permute;
-use feanor_math::{assert_el_eq, ring::*};
+use feanor_math::assert_el_eq;
+use feanor_math::ring::*;
 
 use feanor_math::rings::extension::*;
 use feanor_math::rings::poly::dense_poly::DensePolyRing;
-use feanor_math::rings::poly::{PolyRing, PolyRingStore};
-use feanor_math::rings::zn::{zn_64, zn_big, zn_rns, ZnReductionMap, ZnRing, ZnRingStore};
+use feanor_math::rings::poly::*;
+use feanor_math::rings::zn::*;
 use feanor_math::seq::{VectorFn, VectorView};
 use fheanor::bfv::{BFVInstantiation, Ciphertext, CiphertextRing, PlaintextRing, Pow2BFV};
 use fheanor::bgv::SecretKeyDistribution;
 use fheanor::ciphertext_ring::indices::RNSFactorIndexList;
 use fheanor::ciphertext_ring::BGFVCiphertextRing;
-use fheanor::circuit::{create_circuit_cached, PlaintextCircuit};
+use fheanor::circuit::*;
 use fheanor::clpx::encoding::CLPXPlaintextRing;
 use fheanor::clpx::{CLPXInstantiation, Pow2CLPX};
-use fheanor::digit_extract::polys::{bounded_digit_retain_poly, falling_factorial_poly, mu, poly_to_circuit};
-use fheanor::{filename_keys, NiceZn};
+use fheanor::digit_extract::polys::{bounded_digit_retain_poly, poly_to_circuit};
+use fheanor::filename_keys;
+use fheanor::NiceZn;
 use fheanor::gadget_product::digits::RNSGadgetVectorDigitIndices;
 use fheanor::lin_transform::pow2;
 use fheanor::number_ring::galois::CyclotomicGaloisGroupOps;
@@ -44,24 +45,6 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 const ZZbig: BigIntRing = BigIntRing::RING;
 const ZZi64: StaticRing<i64> = StaticRing::RING;
-
-fn extract_overflow<Params: BFVInstantiation>(P: &PlaintextRing<Params>, C: &CiphertextRing<Params>, ct: &Ciphertext<Params>, r: usize) -> Ciphertext<Params> {
-    let (p, e) = is_prime_power(P.base_ring().integer_ring(), P.base_ring().modulus()).unwrap();
-    let p = int_cast(p, ZZbig, P.base_ring().integer_ring());
-    let v = e - r;
-    let pv = ZZbig.pow(p, v);
-    let hom = C.base_ring().can_hom(&ZZbig).unwrap();
-    let pv_mod_q = hom.map_ref(&pv);
-    let q_pv = ZZbig.mul_ref(&pv, C.base_ring().modulus());
-    let extract = |mut x: El<zn_rns::Zn<zn_64::Zn, BigIntRing>>| {
-        C.base_ring().mul_assign_ref(&mut x, &pv_mod_q);
-        hom.map(ZZbig.rounded_div(ZZbig.mul_ref_snd(C.base_ring().smallest_lift(x), C.base_ring().modulus()), &q_pv))
-    };
-    return (
-        C.from_canonical_basis(C.wrt_canonical_basis(&ct.0).iter().map(&extract)),
-        C.from_canonical_basis(C.wrt_canonical_basis(&ct.1).iter().map(&extract)),
-    );
-}
 
 ///
 /// Returns `p^e/t`, where `p^e` is the characteristic of `P` and `t` is the CLPX modulus.
@@ -97,11 +80,9 @@ fn main() {
     let [t] = ZZX.with_wrapped_indeterminate(|X| [X.pow_ref(1 << (log2_m - 5)) - 2]);
     let t_sqr = ZZX.pow(ZZX.clone_el(&t), 2);
     let P2_clpx = CLPXInstantiation::create_plaintext_ring::<true>(&params, ZZX.clone(), ZZX.clone_el(&t_sqr), ZZbig.pow(int_cast(65537, ZZbig, ZZi64), 2), acting_galois_group.clone());
-    let Zp2X = DensePolyRing::new(P2_clpx.base_ring(), "X");
     let P1_clpx = CLPXInstantiation::create_plaintext_ring::<true>(&params, ZZX.clone(), ZZX.clone_el(&t), int_cast(65537, ZZbig, ZZi64), acting_galois_group.clone());
     let P1_bfv = BFVInstantiation::create_plaintext_ring(&params, ZZbig.clone_el(P1_clpx.base_ring().modulus()));
     let P2_bfv = BFVInstantiation::create_plaintext_ring(&params, ZZbig.clone_el(P2_clpx.base_ring().modulus()));
-    let ZpX = DensePolyRing::new(P1_bfv.base_ring(), "X");
     let (C, C_mul) = CLPXInstantiation::create_ciphertext_rings(&params, 800..820, 1024);
     let digits = RNSGadgetVectorDigitIndices::select_digits(8, C.base_ring().len());
 
@@ -121,6 +102,17 @@ fn main() {
         || pow2::slots_to_coeffs_thin(&H1_clpx)
     );
 
+    let poly_ring = DensePolyRing::new(P2_bfv.base_ring(), "X");
+    let factor = H2_clpx.slot_ring().generating_poly(&poly_ring, P2_bfv.base_ring().can_hom(H2_clpx.slot_ring().base_ring()).unwrap());
+    let h2_bfv = HypercubeStructure::default_pow2_hypercube(P2_bfv.acting_galois_group(), int_cast(*P2_bfv.base_ring().modulus(), ZZbig, ZZi64));
+    let H2_bfv = HypercubeIsomorphism::new_with_poly_factor::<_, true>(&&P2_bfv, &poly_ring, &factor, &h2_bfv, Some("."));
+    drop(h2_bfv);
+    let coeffs_to_slots = create_circuit_cached::<_, _, true>(&P2_bfv, &filename_keys!(coeffs_to_slots, m: P2_bfv.acting_galois_group().m(), o: P2_bfv.acting_galois_group().group_order(), p: *P2_bfv.base_ring().modulus()), Some("."), 
+        || pow2::coeffs_to_slots_thin(&H2_bfv)
+    );
+
+    let circuit = poly_to_circuit(&poly_ring, &[bounded_digit_retain_poly(&poly_ring, 6)]);
+
     let switch_to_sparse_key = <Pow2BFV as BFVInstantiation>::gen_switch_key(
         &C_reduced, 
         rand::rng(), 
@@ -137,6 +129,8 @@ fn main() {
     );
     let ct_input = <Pow2CLPX as CLPXInstantiation>::enc_sym(&P1_clpx, &C, rand::rng(), &m, &sk, 3.2);
     
+    println!("Input noise budget: {}", <Pow2CLPX as CLPXInstantiation>::noise_budget(&P1_clpx, &C, &ct_input, &sk));
+
     let gks = slots_to_coeffs.required_galois_keys(P1_clpx.acting_galois_group()).into_iter()
         .map(|g| {
             let gk = <Pow2CLPX as CLPXInstantiation>::gen_gk(&P1_clpx, &C, rand::rng(), &sk, &g, &digits, 3.2);
@@ -144,13 +138,8 @@ fn main() {
         })
         .collect::<Vec<_>>();
     let ct_in_slots = slots_to_coeffs.evaluate_clpx::<Pow2CLPX, _>(&P1_clpx, &P1_clpx, &C, None, &[ct_input], None, &gks, &mut 0, None).pop().unwrap();
-
-    // `ct_in_slots` should be a BFV encryption of `p/t * 10000`
-    let check = P1_bfv.poly_repr(&ZpX, &<Pow2BFV as BFVInstantiation>::dec(&P1_bfv, &C, <Pow2BFV as BFVInstantiation>::clone_ct(&C, &ct_in_slots), &sk), ZpX.base_ring().identity());
-    let t_mod_p = ZpX.lifted_hom(&ZZX, ZpX.base_ring().can_hom(&ZZbig).unwrap()).map_ref(&t);
-    let value = ZpX.base_ring().clone_el(ZpX.coefficient_at(&ZpX.div_rem_monic(check, &t_mod_p).1, 0));
-    let scale = ZpX.base_ring().coerce(P1_clpx.base_ring(), compute_scale(&P1_clpx));
-    assert_el_eq!(ZpX.base_ring(), ZpX.base_ring().int_hom().map(10000), ZpX.base_ring().checked_div(&value, &scale).unwrap());
+    
+    println!("After slots-to-coeffs: {}", <Pow2CLPX as CLPXInstantiation>::noise_budget(&P1_clpx, &C, &ct_in_slots, &sk));
 
     // ======================== Noisy expansion ========================
 
@@ -164,16 +153,9 @@ fn main() {
         <Pow2BFV as BFVInstantiation>::hom_mul_plain(&P2_bfv, &C, &as_plain.1, enc_sparse_sk)
     );
 
-    // ======================== BFV coeffs-to-slots ========================
+    println!("After noisy-expansion: {}", <Pow2BFV as BFVInstantiation>::noise_budget(&P2_bfv, &C, &ct_noisy_expanded, &sk));
 
-    let poly_ring = DensePolyRing::new(P2_bfv.base_ring(), "X");
-    let factor = H2_clpx.slot_ring().generating_poly(&poly_ring, P2_bfv.base_ring().can_hom(H2_clpx.slot_ring().base_ring()).unwrap());
-    let h2_bfv = HypercubeStructure::default_pow2_hypercube(P2_bfv.acting_galois_group(), int_cast(*P2_bfv.base_ring().modulus(), ZZbig, ZZi64));
-    let H2_bfv = HypercubeIsomorphism::new_with_poly_factor::<_, true>(&&P2_bfv, &poly_ring, &factor, &h2_bfv, Some("."));
-    drop(h2_bfv);
-    let coeffs_to_slots = create_circuit_cached::<_, _, true>(&P2_bfv, &filename_keys!(coeffs_to_slots, m: P2_bfv.acting_galois_group().m(), o: P2_bfv.acting_galois_group().group_order(), p: *P2_bfv.base_ring().modulus()), Some("."), 
-        || pow2::coeffs_to_slots_thin(&H2_bfv)
-    );
+    // ======================== BFV coeffs-to-slots ========================
     
     let gks = coeffs_to_slots.required_galois_keys(P2_bfv.acting_galois_group()).into_iter()
         .map(|g| {
@@ -182,6 +164,8 @@ fn main() {
         })
         .collect::<Vec<_>>();
     let ct_bfv_slots = coeffs_to_slots.evaluate_bfv::<Pow2BFV, _>(&P2_bfv, &P2_bfv, &C, None, &[ct_noisy_expanded], None, &gks, &mut 0, None).pop().unwrap();
+
+    println!("After coeffs-to-slots: {}", <Pow2BFV as BFVInstantiation>::noise_budget(&P2_bfv, &C, &ct_bfv_slots, &sk));
 
     // ======================== Back to CLPX ========================
 
@@ -205,11 +189,12 @@ fn main() {
 
     let scale = P2_clpx.inclusion().map(compute_scale(&P2_clpx));
     let cts_clpx_slots = cts_bfv_slots_masked.into_iter().map(|ct| <Pow2CLPX as CLPXInstantiation>::hom_mul_plain(&P2_clpx, &C, &scale, ct)).collect::<Vec<_>>();
+    
+    println!("After convert-to-clpx: {}", <Pow2CLPX as CLPXInstantiation>::noise_budget(&P2_clpx, &C, &cts_clpx_slots[0], &sk));
 
     // ======================== Digit Extraction ========================
 
     let rk = <Pow2CLPX as CLPXInstantiation>::gen_rk(&C, rand::rng(), &sk, &digits, 3.2);
-    let circuit = poly_to_circuit(&Zp2X, &[bounded_digit_retain_poly(&Zp2X, 6)]);
     
     // the ciphertexts `ct_cleaned` now contain, in their slots, 
     // the coefficients of `p^2/t m` modulo `p^2`
@@ -217,6 +202,8 @@ fn main() {
         let ct_error = circuit.evaluate_clpx::<Pow2CLPX, _>(ZZi64, &P2_clpx, &C, Some(&C_mul), from_ref(&ct), Some(&rk), &[], &mut 0, None).pop().unwrap();
         return <Pow2CLPX as CLPXInstantiation>::hom_sub(&C, ct, &ct_error);
     }).collect::<Vec<_>>();
+
+    println!("After digit-extract: {}", <Pow2CLPX as CLPXInstantiation>::noise_budget(&P2_clpx, &C, &ct_cleaned[0], &sk));
 
     // ======================== Modulo t ========================
 
@@ -227,9 +214,10 @@ fn main() {
         <Pow2CLPX as CLPXInstantiation>::hom_add(&C, ct1, &ct2)
     ).unwrap();
 
-    
     let scale = P1_clpx.inclusion().map(P1_clpx.base_ring().pow(P1_clpx.base_ring().invert(&compute_scale(&P1_clpx)).unwrap(), 2));
     let ct_result = <Pow2CLPX as CLPXInstantiation>::hom_mul_plain(&P1_clpx, &C, &scale, ct_mod_t);
+
+    println!("After modulo-t: {}", <Pow2CLPX as CLPXInstantiation>::noise_budget(&P1_clpx, &C, &ct_result, &sk));
 
     let result = <Pow2CLPX as CLPXInstantiation>::dec(&P1_clpx, &C, ct_result, &sk);
     for x in H1_clpx.get_slot_values(&result) {
