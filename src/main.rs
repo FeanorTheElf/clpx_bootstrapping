@@ -82,7 +82,11 @@ fn compute_scale<NumberRing, ZnTy, A, C>(P: &CLPXPlaintextRing<NumberRing, ZnTy,
 }
 
 fn main() {
-    let log2_m = 10;
+    let (chrome_layer, _guard) = tracing_chrome::ChromeLayerBuilder::new().build();
+    let filtered_chrome_layer = chrome_layer.with_filter(tracing_subscriber::filter::filter_fn(|metadata| !["small_basis_to_mult_basis", "mult_basis_to_small_basis", "small_basis_to_coeff_basis", "coeff_basis_to_small_basis"].contains(&metadata.name())));
+    tracing_subscriber::registry().with(filtered_chrome_layer).init();
+
+    let log2_m = 15;
     let params = Pow2CLPX::new(1 << log2_m);
     let number_ring = CLPXInstantiation::number_ring(&params);
     let acting_galois_group = number_ring.galois_group().get_group().clone().subgroup([number_ring.galois_group().from_representative(33)]);
@@ -214,11 +218,15 @@ fn main() {
     // ======================== Modulo t ========================
 
     let hom = P1_clpx.inclusion().compose(P1_clpx.base_ring().can_hom(&ZZbig).unwrap());
-    let ct_result = ct_cleaned.into_iter().enumerate().map(|(i, ct)|
+    let ct_mod_t = ct_cleaned.into_iter().enumerate().map(|(i, ct)|
         <Pow2CLPX as CLPXInstantiation>::hom_mul_plain(&P1_clpx, &C, &hom.map(ZZbig.power_of_two(i)), ct)
     ).reduce(|ct1, ct2|
         <Pow2CLPX as CLPXInstantiation>::hom_add(&C, ct1, &ct2)
     ).unwrap();
+
+    
+    let scale = P1_clpx.inclusion().map(P1_clpx.base_ring().pow(P1_clpx.base_ring().invert(&compute_scale(&P1_clpx)).unwrap(), 2));
+    let ct_result = <Pow2CLPX as CLPXInstantiation>::hom_mul_plain(&P1_clpx, &C, &scale, ct_mod_t);
 
     let result = <Pow2CLPX as CLPXInstantiation>::dec(&P1_clpx, &C, ct_result, &sk);
     for x in H1_clpx.get_slot_values(&result) {
