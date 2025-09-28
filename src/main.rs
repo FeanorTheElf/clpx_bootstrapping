@@ -38,6 +38,9 @@ use fheanor::number_ring::galois::CyclotomicGaloisGroupOps;
 use fheanor::number_ring::hypercube::isomorphism::HypercubeIsomorphism;
 use fheanor::number_ring::hypercube::structure::HypercubeStructure;
 use fheanor::number_ring::{AbstractNumberRing, NumberRingQuotientStore};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::Layer;
+use tracing_subscriber::util::SubscriberInitExt;
 
 const ZZbig: BigIntRing = BigIntRing::RING;
 const ZZi64: StaticRing<i64> = StaticRing::RING;
