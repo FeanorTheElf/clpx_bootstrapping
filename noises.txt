@@ -1,0 +1,6 @@
+After slots-to-coeffs: 630
+After noisy-expansion: 735
+After coeffs-to-slots: 182
+After convert-to-clpx: 165
+After digit-extract: 87
+After modulo-t: 86
