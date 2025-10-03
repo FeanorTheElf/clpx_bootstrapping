@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-feanor-math = "3.5.3"
+feanor-math = "3.5.5"
 fheanor = { path = "F:\\Users\\Simon\\Documents\\Projekte\\fheanor" }
 rand = "0.9.2"
 tracing = "0.1.41"

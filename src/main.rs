@@ -60,7 +60,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Layer;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use crate::eval::ScaledVectorBFVEvaluator;
+use crate::eval::GadgetDecomposingEvaluator;
 
 const ZZbig: BigIntRing = BigIntRing::RING;
 const ZZi64: StaticRing<i64> = StaticRing::RING;
@@ -226,12 +226,26 @@ fn main() {
     let digits = RNSGadgetVectorDigitIndices::select_digits(8, C.base_ring().len());
 
     // ======================== Prepare keys ======================== 
+
+    let gadget_vector = (0..).scan(ZZbig.one(), |current, _| {
+        let result = ZZbig.clone_el(current);
+        ZZbig.int_hom().mul_assign_map(current, 1000);
+        return Some(result);
+    })
+        .take_while(|x| ZZbig.is_lt(x, P2_bfv.base_ring().modulus()))
+        .map(|x| P2_bfv.base_ring().coerce(&ZZbig, x))
+        .collect::<Vec<_>>();
     
     let sk = <Pow2CLPX as CLPXInstantiation>::gen_sk(&C, rand::rng(), SecretKeyDistribution::SparseWithHwt(128));
     let C_reduced = RingValue::from(C.get_ring().drop_rns_factor(&RNSFactorIndexList::from(2..C.base_ring().len(), C.base_ring().len())));
     let sparse_sk = <Pow2CLPX as CLPXInstantiation>::gen_sk(&C_reduced, rand::rng(), SecretKeyDistribution::SparseWithHwt(32));
     let hom = P2_bfv.base_ring().can_hom(&ZZbig).unwrap();
-    let enc_sparse_sk = <BigPow2BFV as BFVInstantiation>::enc_sym(&P2_bfv, &C, rand::rng(), &P2_bfv.from_canonical_basis(C_reduced.wrt_canonical_basis(&sparse_sk).iter().map(|c| hom.map(C_reduced.base_ring().smallest_lift(c)))), &sk, 3.2);
+    let enc_sparse_sk = gadget_vector.iter().map(|gi| 
+        <BigPow2BFV as BFVInstantiation>::enc_sym(&P2_bfv, &C, rand::rng(), &P2_bfv.inclusion().mul_ref_map(
+            &P2_bfv.from_canonical_basis(C_reduced.wrt_canonical_basis(&sparse_sk).iter().map(|c| hom.map(C_reduced.base_ring().smallest_lift(c)))),
+            gi)
+        , &sk, 3.2)
+    ).collect::<Vec<_>>();
 
     let h2_clpx = HypercubeStructure::default_pow2_hypercube(P2_clpx.acting_galois_group(), ZZbig.clone_el(P2_clpx.base_ring().modulus()));
     let H2_clpx = HypercubeIsomorphism::new::<true>(&&P2_clpx, &h2_clpx, Some("."));
@@ -288,11 +302,13 @@ fn main() {
         &switch_to_sparse_key
     );
     let as_plain = <BigPow2BFV as BFVInstantiation>::mod_switch_to_plaintext(&P2_bfv, &C_reduced, ct_sparse_key_switched);
-    let ct_noisy_expanded = <BigPow2BFV as BFVInstantiation>::hom_add_plain(&P2_bfv, &C, &as_plain.0, 
-        <BigPow2BFV as BFVInstantiation>::hom_mul_plain(&P2_bfv, &C, &as_plain.1, enc_sparse_sk)
-    );
+    let ct_noisy_expanded = gadget_vector.iter().zip(enc_sparse_sk.iter()).map(|(gi, gi_sk)| 
+            <BigPow2BFV as BFVInstantiation>::hom_add_plain(&P2_bfv, &C, &P2_bfv.inclusion().mul_ref_map(&as_plain.0, gi), 
+            <BigPow2BFV as BFVInstantiation>::hom_mul_plain(&P2_bfv, &C, &as_plain.1, <BigPow2BFV as BFVInstantiation>::clone_ct(&C, &gi_sk))
+        )
+    ).collect::<Vec<_>>();
 
-    println!("After noisy-expansion: {}", <BigPow2BFV as BFVInstantiation>::noise_budget(&P2_bfv, &C, &ct_noisy_expanded, &sk));
+    println!("After noisy-expansion: {}", <BigPow2BFV as BFVInstantiation>::noise_budget(&P2_bfv, &C, &ct_noisy_expanded[0], &sk));
 
     // ======================== BFV coeffs-to-slots ========================
     
@@ -302,7 +318,8 @@ fn main() {
             (g, gk)
         })
         .collect::<Vec<_>>();
-    let ct_bfv_slots = coeffs_to_slots.evaluate_bfv::<BigPow2BFV, _>(&P2_bfv, &P2_bfv, &C, None, &[ct_noisy_expanded], None, &gks, &mut 0, None).pop().unwrap();
+    let gadget_decomposing_evaluator = GadgetDecomposingEvaluator::<BigPow2BFV>::new(&gadget_vector, &P2_bfv, &C, &gks);
+    let ct_bfv_slots = coeffs_to_slots.evaluate_generic(&[ct_noisy_expanded], gadget_decomposing_evaluator).pop().unwrap().into_iter().next().unwrap();
 
     println!("After coeffs-to-slots: {}", <BigPow2BFV as BFVInstantiation>::noise_budget(&P2_bfv, &C, &ct_bfv_slots, &sk));
 
